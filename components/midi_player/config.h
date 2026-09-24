@@ -1,0 +1,14 @@
+#ifndef MIDI_CONFIG_H
+#define MIDI_CONFIG_H
+
+#define SAMPLE_RATE 44100
+#define DMA_BUFFER_LEN 256
+#define MAX_VOICES 16
+#define MAX_VOICES_PER_NOTE 8
+#define PITCH_BEND_CENTER 8192
+
+// Аудио форматы
+#define AUDIO_CHANNEL_NUM 2
+#define CHANNEL_SAMPLE_BYTES 2
+
+#endif // MIDI_CONFIG_H
