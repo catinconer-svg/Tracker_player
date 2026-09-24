@@ -36,6 +36,7 @@ static player_mode_t current_player_mode = PLAYER_MODE_NONE;
 
 /* Пути к SF2 для разных режимов */
 /* Пути к SF2 для разных режимов */
+/*тестовый текст*/
 char g_midi_player_sf2_path[256] = "/sdcard/soundfonts/MIDI_PLAYER/GS Sound Set.sf2";
 char g_usb_synth_sf2_path[256] = "/sdcard/soundfonts/USB_SYNTH/GS Sound Set.sf2";
 
