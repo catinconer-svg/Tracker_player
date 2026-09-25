@@ -61,6 +61,6 @@ direct_dependencies:
 - idf
 - lvgl/lvgl
 - waveshare/esp_lcd_st7735
-manifest_hash: 1a5651fa2d49f6a6533fc655d5fa31d47f153c32eb37dd7ad94000ab183fd5f1
+manifest_hash: c61ca99f33c9feec630135cf140fb9ca528c16013d9c1ee2d380fa4f12d2530e
 target: esp32s3
 version: 2.0.0
