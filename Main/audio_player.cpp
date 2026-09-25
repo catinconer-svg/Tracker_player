@@ -3141,42 +3141,6 @@ case PLAYER_CMD_RELOAD_SF2:
 
 
 // В gb_emulation_task, вместо старого вызова:
-static void gb_emulation_task(void *pvParameters) {
-    const char *rom_path = (const char *)pvParameters;
-    ESP_LOGI(TAG, "GB emulation task STARTED for: %s", rom_path);
-    
-    int frame_count = 0;
-    uint32_t last_fps_check = esp_timer_get_time();
-    int fps_counter = 0;
-    
-    while (is_playing && gb_emulator_is_running()) {
-        gb_emulator_run_frame();
-        fps_counter++;
-        frame_count++;
-     /*   
-        uint32_t now = esp_timer_get_time();
-        if (now - last_fps_check > 1000000) {
-            ESP_LOGI(TAG, "FPS: %d, frames: %d", fps_counter, frame_count);
-            fps_counter = 0;
-            last_fps_check = now;
-        }
-       */ 
-        uint16_t *fb = gb_emulator_get_framebuffer();
-        if (fb) {
-            gb_display_adapter_update_rgb(fb);
-        }
-    }
-    
-    ESP_LOGI(TAG, "GB emulation task FINISHED, frames=%d", frame_count);
-    gb_display_adapter_deinit();
-    gb_emulator_deinit();
-    current_player_mode = PLAYER_MODE_NONE;
-    vTaskDelete(NULL);
-}
-
-
-
-
 /* --- Задача вывода звука --- */
 static void audio_output_task(void *pvParameters)
 {
@@ -3411,6 +3375,46 @@ esp_err_t audio_player_init(void)
     return i2s_init();
 }
 
+/* Задача-хост эмуляции GB. audio_player_play() для GB-режима не блокирует
+ * LVGL-задачу; вся очистка — здесь, по завершении эмуляции. */
+static void gb_host_task(void *pvParameters)
+{
+    char path[256];
+    strncpy(path, (const char *)pvParameters, sizeof(path) - 1);
+    path[sizeof(path) - 1] = '\0';
+    free(pvParameters);
+
+    if (audio_player_play(path) != ESP_OK) {
+        /* Ошибку уже залогировал audio_player_play; возврат в эксплорер */
+        player_stopped_for_explorer = true;
+        vTaskDelete(NULL);
+        return;
+    }
+
+    while (gb_emulator_is_running() && is_playing) {
+        vTaskDelay(pdMS_TO_TICKS(50));
+    }
+
+    ESP_LOGI(TAG, "GB emulation ended, returning to explorer");
+    is_playing = false;
+    gb_display_adapter_deinit();
+    gb_emulator_deinit();
+    current_player_mode = PLAYER_MODE_NONE;
+    input_set_mode(INPUT_MODE_FILE_EXPLORER);
+    player_stopped_for_explorer = true;  // main.c перезагрузит экран
+    vTaskDelete(NULL);
+}
+
+esp_err_t audio_player_play_gb_async(const char *filepath)
+{
+    char *copy = (char *)malloc(strlen(filepath) + 1);
+    if (!copy) return ESP_ERR_NO_MEM;
+    strcpy(copy, filepath);
+    BaseType_t r = xTaskCreate(gb_host_task, "gb_host", 4096, copy, 12, NULL);
+    if (r != pdPASS) { free(copy); return ESP_FAIL; }
+    return ESP_OK;
+}
+
 esp_err_t audio_player_play(const char *filepath)
 {
     
@@ -3460,40 +3464,16 @@ if (is_gb_file(filepath)) {
         return ESP_FAIL;
     }
     
+    // Эмулятор уже запущен собственной задачей внутри gb_emulator_init()
+    // ("gb_emu", ядро 1). Раньше здесь создавалась ВТОРАЯ задача с таким же
+    // именем и пустым циклом (gb_emulator_run_frame() — no-op) — она
+    // конфликтовала с внутренней и всегда падала: "Failed to create GB task!".
+    // Теперь отдельная задача-обёртка не нужна: просто следим за завершением.
     is_playing = true;
-    static char pc[256];
-    strncpy(pc, filepath, sizeof(pc)-1);
-    pc[sizeof(pc)-1] = '\0';
-    
-    ESP_LOGI(TAG, "Creating GB task...");
-    ESP_LOGI(TAG, "Free heap before GB task: %d bytes", esp_get_free_heap_size());
-    ESP_LOGI(TAG, "Free PSRAM: %d bytes", heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
-    BaseType_t result = xTaskCreatePinnedToCore(
-        gb_emulation_task, 
-        "gb_emu", 
-        8192,
-        pc, 
-        18, 
-        NULL, 
-        1
-    );
-    
-    if (result != pdPASS) {
-        ESP_LOGE(TAG, "Failed to create GB task!");
-        is_playing = false;
-        gb_display_adapter_deinit();
-        gb_emulator_deinit();
-        lv_scr_load(main_screen);
-        input_set_mode(INPUT_MODE_FILE_EXPLORER);
-        current_player_mode = PLAYER_MODE_NONE;
-        return ESP_FAIL;
-    }
-    
-    ESP_LOGI(TAG, "GB task created successfully");
+    is_paused = false;
+    player_stopped_for_explorer = false;
     return ESP_OK;
 }
-
-
 
     if (is_wav_file(filepath)) {
         is_playing = true; is_paused = false; player_stopped_for_explorer = false;

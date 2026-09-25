@@ -62,6 +62,7 @@ typedef enum {
 
 esp_err_t audio_player_init(void);
 esp_err_t audio_player_play(const char *filepath);
+esp_err_t audio_player_play_gb_async(const char *filepath);
 void audio_player_stop(void);
 void audio_player_process_ui(void);
 void audio_player_toggle_pause(void);

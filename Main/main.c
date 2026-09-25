@@ -190,6 +190,16 @@ if (ext && strcasecmp(ext, ".sf2") == 0) {
             return;
         }
         
+        /* ★ ROM GAME BOY — запуск в отдельной задаче (не блокирует LVGL) ★ */
+        const char *ext_gb = strrchr(sel_fn, '.');
+        if (ext_gb && (strcasecmp(ext_gb, ".gb") == 0 || strcasecmp(ext_gb, ".gbc") == 0)) {
+            char full_path[256];
+            snprintf(full_path, sizeof(full_path), "%s%s", cur_path, sel_fn);
+            ESP_LOGI(TAG, "Starting GB ROM: %s", full_path);
+            audio_player_play_gb_async(full_path);
+            return;
+        }
+
         /* ★ ОБЫЧНАЯ ОБРАБОТКА МУЗЫКАЛЬНЫХ ФАЙЛОВ ★ */
         if (is_tracker_file(sel_fn)) {
             char full_path[256];
