@@ -80,19 +80,27 @@ void lvgl_port_render_gb_direct_rgb(uint16_t *rgb_buffer) {
     
     const int CROP_TOP = 8;
     const int CROP_HEIGHT = 128;
+    const int GB_W = 160, GB_H = 144;   // размер кадра Game Boy
     const int CHUNK_HEIGHT = 32;  // ★ ОПТИМАЛЬНЫЙ РАЗМЕР ★
-    
-    // ★ РИСУЕМ БОЛЬШИМИ ЧАНКАМИ ★
-    for (int y = 0; y < CROP_HEIGHT; y += CHUNK_HEIGHT) {
-        int chunk_h = CHUNK_HEIGHT;
-        if (y + chunk_h > CROP_HEIGHT) chunk_h = CROP_HEIGHT - y;
-        
-        const uint16_t *src = rgb_buffer + (CROP_TOP + y) * 160;
-        
-        esp_lcd_panel_draw_bitmap(gb_panel_handle, 
-                                  0, y, 
-                                  160, y + chunk_h, 
-                                  src);
+
+    // ★ МАСШТАБИРОВАНИЕ 160x128 -> ~320x256 (заполняет экран 320x240) ★
+    // Для каждого выходного ряда берем соответствующий исходный ряд (nearest-neighbor),
+    // каждый пиксель дублируем по горизонтали в 2 раза.
+    const int OUT_H = 240;
+    for (int oy = 0; oy < OUT_H; oy++) {
+        int gy = CROP_TOP + oy * CROP_HEIGHT / OUT_H;
+        if (gy >= CROP_TOP + CROP_HEIGHT) gy = CROP_TOP + CROP_HEIGHT - 1;
+
+        uint16_t line[LCD_H_RES];
+        const uint16_t *src = rgb_buffer + gy * GB_W;
+        for (int x = 0; x < LCD_H_RES && x < GB_W * 2; x++) {
+            line[x] = src[x >> 1];
+        }
+
+        esp_lcd_panel_draw_bitmap(gb_panel_handle,
+                                  0, oy,
+                                  LCD_H_RES, oy + 1,
+                                  line);
     }
     
     // ★ ТОЛЬКО ОДИН YIELD ПОСЛЕ ВСЕГО КАДРА ★
