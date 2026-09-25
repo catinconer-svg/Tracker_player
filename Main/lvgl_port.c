@@ -12,7 +12,6 @@
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include "esp_lcd_st7789.h"
 #include "esp_log.h"
 
 // --- Пины дисплея (новая схема, ESP32-S3) ---
@@ -36,24 +35,49 @@ static const char *TAG = "LVGL_PORT";
 
 // --- Таблица инициализации ST7789 (320x240) ---
 // MADCTL (0x36) = 0xA0 задан здесь же, ниже в таблице
-static const st7789_lcd_init_cmd_t st7789_init_cmds[] = {
-    // cmd, data, bytes, delay_ms
-    {0xB2, (uint8_t[]){0x05, 0x05, 0x00, 0x11, 0x11}, 5, 0},   // Porch Setting (минимум для разгона)
-    {0xBB, (uint8_t[]){0x32}, 1, 0},                           // VCOMS control
-    {0xC0, (uint8_t[]){0x2C}, 1, 0},                           // LCM control
-    {0xC2, (uint8_t[]){0x01}, 1, 0},                           // VDV and VRH command enable
-    {0xC3, (uint8_t[]){0x12}, 1, 0},                           // VRH set
-    {0xC4, (uint8_t[]){0x20}, 1, 0},                           // VDV set
-    {0xC6, (uint8_t[]){0x01}, 1, 0},                           // Frame Rate Control (0x01 = 111Hz)
-    {0xD0, (uint8_t[]){0xA4, 0xA1}, 2, 0},                     // Power Control 1
-    {0x3A, (uint8_t[]){0x05}, 1, 0},                           // 16-bit/pixel
-    {0x36, (uint8_t[]){0xA0}, 1, 0},                           // MADCTL: MY|MX — ландшафт
-    {0xE0, (uint8_t[]){0xD0, 0x04, 0x0D, 0x11, 0x13, 0x2B, 0x3F,
-                      0x54, 0x4C, 0x18, 0x0D, 0x0B, 0x1F, 0x23}, 14, 0}, // Positive Gamma
-    {0xE1, (uint8_t[]){0xD0, 0x04, 0x0C, 0x11, 0x13, 0x2C, 0x3F,
-                      0x44, 0x51, 0x2F, 0x1F, 0x1F, 0x20, 0x23}, 14, 0}, // Negative Gamma
-    {0x21, NULL, 0, 0},                                        // Display Inversion ON (для ST7789)
+typedef struct {
+    uint8_t cmd;
+    uint8_t data[16];
+    uint8_t len;        // количество байт данных
+    int     delay_ms;   // задержка после команды
+} st7789_init_cmd_t;
+
+static const st7789_init_cmd_t st7789_init_cmds[] = {
+    // cmd, data{байты...}, len, delay_ms
+    {0xB2, {0x05, 0x05, 0x00, 0x11, 0x11}, 5, 0},   // Porch Setting (минимум для разгона)
+    {0xBB, {0x32}, 1, 0},                           // VCOMS control
+    {0xC0, {0x2C}, 1, 0},                           // LCM control
+    {0xC2, {0x01}, 1, 0},                           // VDV and VRH command enable
+    {0xC3, {0x12}, 1, 0},                           // VRH set
+    {0xC4, {0x20}, 1, 0},                           // VDV set
+    {0xC6, {0x01}, 1, 0},                           // Frame Rate Control (0x01 = 111Hz)
+    {0xD0, {0xA4, 0xA1}, 2, 0},                     // Power Control 1
+    {0x3A, {0x05}, 1, 0},                           // 16-bit/pixel
+    {0x36, {0xA0}, 1, 0},                           // MADCTL: MY|MX — ландшафт
+    {0xE0, {0xD0, 0x04, 0x0D, 0x11, 0x13, 0x2B, 0x3F,
+            0x54, 0x4C, 0x18, 0x0D, 0x0B, 0x1F, 0x23}, 14, 0}, // Positive Gamma
+    {0xE1, {0xD0, 0x04, 0x0C, 0x11, 0x13, 0x2C, 0x3F,
+            0x44, 0x51, 0x2F, 0x1F, 0x1F, 0x20, 0x23}, 14, 0}, // Negative Gamma
+    {0x21, {0}, 0, 0},                              // Display Inversion ON (для ST7789)
+    {0x11, {0}, 0, 120},                            // Sleep Out + задержка
+    {0x29, {0}, 0, 10},                             // Display ON
 };
+
+// Отправка таблицы инициализации через panel IO
+static esp_err_t st7789_send_init_table(esp_lcd_panel_io_handle_t io)
+{
+    for (size_t i = 0; i < sizeof(st7789_init_cmds) / sizeof(st7789_init_cmds[0]); i++) {
+        const st7789_init_cmd_t *c = &st7789_init_cmds[i];
+        esp_err_t e = esp_lcd_panel_io_tx_param(io, c->cmd,
+                                                c->len ? c->data : NULL, c->len);
+        if (e != ESP_OK) {
+            ESP_LOGE(TAG, "init cmd 0x%02X failed: %s", c->cmd, esp_err_to_name(e));
+            return e;
+        }
+        if (c->delay_ms) vTaskDelay(pdMS_TO_TICKS(c->delay_ms));
+    }
+    return ESP_OK;
+}
 
 static lv_display_t *disp;
 static lv_color_t *buf1;
@@ -165,20 +189,12 @@ lv_display_t *lvgl_port_init(void)
     // ★ СОХРАНЯЕМ IO_HANDLE ★
     gb_io_handle = io_handle;
 
-    // 3. Создание панели ST7789 с кастомной таблицей инициализации
+    // 3. Создание панели ST7789 (generic-драйвер из состава esp_lcd, без внешних компонентов)
     esp_lcd_panel_handle_t panel_handle = NULL;
     esp_lcd_panel_dev_config_t panel_config = {
         .reset_gpio_num = PIN_LCD_RST,
         .rgb_ele_order = LCD_RGB_ELEMENT_ORDER_RGB,
         .bits_per_pixel = 16,
-        .vendor_config = &(esp_lcd_panel_vendor_st7789_t){
-            .reset_sequence_us = 5000,
-            .init_sequence_us = 5000,
-            .invert_on = true,          // инверсия включена (ST7789 требует 0x21)
-            .rgb_ele_order = LCD_RGB_ELEMENT_ORDER_RGB,
-            .cmds_to_submit = st7789_init_cmds,
-            .num_of_cmds = sizeof(st7789_init_cmds) / sizeof(st7789_init_cmds[0]),
-        },
     };
     err = esp_lcd_new_panel_st7789(io_handle, &panel_config, &panel_handle);
     if (err != ESP_OK) {
@@ -190,22 +206,22 @@ lv_display_t *lvgl_port_init(void)
     // ★ СОХРАНЯЕМ PANEL_HANDLE ДЛЯ GAMEBOY ★
     gb_panel_handle = panel_handle;
 
-    // 4. Инициализация панели
+    // 4. Инициализация панели: сброс -> наша таблица инициализации
+    //    (таблица содержит Sleep Out 0x11 и Display ON 0x29)
     err = esp_lcd_panel_reset(panel_handle);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "panel_reset failed: %s", esp_err_to_name(err));
         return NULL;
     }
-    err = esp_lcd_panel_init(panel_handle);
+    err = st7789_send_init_table(io_handle);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "panel_init failed: %s", esp_err_to_name(err));
+        ESP_LOGE(TAG, "init table failed: %s", esp_err_to_name(err));
         return NULL;
     }
 
 
-
     ESP_ERROR_CHECK(esp_lcd_panel_set_gap(panel_handle, 0, 0));
-    // Инверсия цвета уже выставлена через vendor_config (.invert_on = true)
+    // Инверсия цвета включена командой 0x21 в таблице инициализации
     vTaskDelay(pdMS_TO_TICKS(50));
     ESP_LOGI(TAG, "Panel initialized");
 

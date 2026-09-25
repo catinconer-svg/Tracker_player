@@ -15,7 +15,6 @@ dependencies:
   #   # All dependencies of `main` are public by default.
   #   public: true
   lvgl/lvgl: ^9.5.0
-  espressif/esp_lcd_st7789: ^1.1.2
   esphome/micro-flac: ^0.2.0
   esphome/micro-mp3: ^0.2.1
   esphome/micro-opus: ^0.4.1
