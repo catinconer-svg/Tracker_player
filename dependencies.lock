@@ -1,0 +1,66 @@
+dependencies:
+  esphome/micro-flac:
+    dependencies: []
+    source:
+      path: C:\Users\Petr\Documents\GH\tracker_player\Tracker_player\managed_components\esphome__micro-flac
+      type: local
+    version: 0.2.0
+  esphome/micro-mp3:
+    dependencies: []
+    source:
+      path: C:\Users\Petr\Documents\GH\tracker_player\Tracker_player\managed_components\esphome__micro-mp3
+      type: local
+    version: 0.2.1
+  esphome/micro-opus:
+    dependencies: []
+    source:
+      path: C:\Users\Petr\Documents\GH\tracker_player\Tracker_player\managed_components\esphome__micro-opus
+      type: local
+    version: 0.4.1
+  espressif/esp_tinyusb:
+    dependencies: []
+    source:
+      path: C:\Users\Petr\Documents\GH\tracker_player\Tracker_player\managed_components\espressif__esp_tinyusb
+      type: local
+    version: 2.2.0
+  espressif/tinyusb:
+    dependencies: []
+    source:
+      path: C:\Users\Petr\Documents\GH\tracker_player\Tracker_player\managed_components\espressif__tinyusb
+      type: local
+    version: 0.19.0~3
+  espressif/zlib:
+    dependencies: []
+    source:
+      path: C:\Users\Petr\Documents\GH\tracker_player\Tracker_player\managed_components\espressif__zlib
+      type: local
+    version: 1.3.2
+  idf:
+    source:
+      type: idf
+    version: 5.5.3
+  lvgl/lvgl:
+    dependencies: []
+    source:
+      path: C:\Users\Petr\Documents\GH\tracker_player\Tracker_player\managed_components\lvgl__lvgl
+      type: local
+    version: 9.5.0
+  waveshare/esp_lcd_st7735:
+    dependencies: []
+    source:
+      path: C:\Users\Petr\Documents\GH\tracker_player\Tracker_player\managed_components\waveshare__esp_lcd_st7735
+      type: local
+    version: 1.0.1
+direct_dependencies:
+- esphome/micro-flac
+- esphome/micro-mp3
+- esphome/micro-opus
+- espressif/esp_tinyusb
+- espressif/tinyusb
+- espressif/zlib
+- idf
+- lvgl/lvgl
+- waveshare/esp_lcd_st7735
+manifest_hash: c61ca99f33c9feec630135cf140fb9ca528c16013d9c1ee2d380fa4f12d2530e
+target: esp32s3
+version: 2.0.0

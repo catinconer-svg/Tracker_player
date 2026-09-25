@@ -1,0 +1,24 @@
+idf_component_register(
+    SRCS 
+        audio_player.cpp 
+        settings_ui.c 
+        main.c 
+        lvgl_port.c 
+        sd_card.c 
+        input.c 
+        player_ui.c
+    INCLUDE_DIRS 
+        "."
+        "../components/gbc"
+    REQUIRES 
+        lvgl 
+        esp_lcd 
+        esp_timer 
+        libxmp 
+        fatfs 
+        spi_flash 
+        gme 
+        midi_player 
+        tinyusb 
+        gbc
+)
