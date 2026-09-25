@@ -173,7 +173,7 @@ lv_display_t *lvgl_port_init(void)
         .cs_gpio_num = PIN_LCD_CS,
         .dc_gpio_num = PIN_LCD_DC,
         .spi_mode = 0,
-        .pclk_hz = 80 * 1000 * 1000,
+        .pclk_hz = 40 * 1000 * 1000,
         .trans_queue_depth = 16,
         .lcd_cmd_bits = 8,
         .lcd_param_bits = 8,
@@ -192,7 +192,7 @@ lv_display_t *lvgl_port_init(void)
     // 3. Создание панели ST7789 (generic-драйвер из состава esp_lcd, без внешних компонентов)
     esp_lcd_panel_handle_t panel_handle = NULL;
     esp_lcd_panel_dev_config_t panel_config = {
-        .reset_gpio_num = PIN_LCD_RST,
+        .reset_gpio_num = -1,   // сброс выполняем вручную по GPIO3 (см. ниже)
         .rgb_ele_order = LCD_RGB_ELEMENT_ORDER_RGB,
         .bits_per_pixel = 16,
     };
@@ -208,11 +208,15 @@ lv_display_t *lvgl_port_init(void)
 
     // 4. Инициализация панели: сброс -> наша таблица инициализации
     //    (таблица содержит Sleep Out 0x11 и Display ON 0x29)
-    err = esp_lcd_panel_reset(panel_handle);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "panel_reset failed: %s", esp_err_to_name(err));
-        return NULL;
-    }
+    // Сброс выполняем вручную: generic-драйвер при reset_gpio_num = -1
+    // ничего не делает в panel_reset.
+    gpio_reset_pin(PIN_LCD_RST);
+    gpio_set_direction(PIN_LCD_RST, GPIO_MODE_OUTPUT);
+    gpio_set_level(PIN_LCD_RST, 0);
+    vTaskDelay(pdMS_TO_TICKS(20));
+    gpio_set_level(PIN_LCD_RST, 1);
+    vTaskDelay(pdMS_TO_TICKS(120));
+
     err = st7789_send_init_table(io_handle);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "init table failed: %s", esp_err_to_name(err));
@@ -231,14 +235,25 @@ lv_display_t *lvgl_port_init(void)
     // 6. Инициализация LVGL
     lv_init();
 
-    // Буферы на треть экрана для частичной отрисовки
-    const size_t buf_pixels = LCD_H_RES * (LCD_V_RES / 3);
-    buf1 = heap_caps_malloc(buf_pixels * sizeof(lv_color_t), MALLOC_CAP_DMA);
-    buf2 = heap_caps_malloc(buf_pixels * sizeof(lv_color_t), MALLOC_CAP_DMA);
+    // Буферы: пробуем 1/3 экрана (DMA-память), при нехватке — половину, затем 1/8
+    static const size_t buf_divs[] = {3, 6, 8};
+    size_t buf_pixels = 0;
+    for (size_t i = 0; i < sizeof(buf_divs) / sizeof(buf_divs[0]); i++) {
+        buf_pixels = LCD_H_RES * (LCD_V_RES / buf_divs[i]);
+        buf1 = heap_caps_malloc(buf_pixels * sizeof(lv_color_t), MALLOC_CAP_DMA);
+        buf2 = heap_caps_malloc(buf_pixels * sizeof(lv_color_t), MALLOC_CAP_DMA);
+        if (buf1 && buf2) break;
+        if (buf1) { free(buf1); buf1 = NULL; }
+        if (buf2) { free(buf2); buf2 = NULL; }
+        ESP_LOGW(TAG, "LVGL buffers 1/%u of screen too large, trying smaller",
+                 (unsigned)buf_divs[i]);
+    }
     if (!buf1 || !buf2) {
         ESP_LOGE(TAG, "Failed to allocate LVGL buffers");
         return NULL;
     }
+    ESP_LOGI(TAG, "LVGL buffers allocated: %u px each (%u KB)",
+             (unsigned)buf_pixels, (unsigned)(buf_pixels * 2 / 1024));
 
     // Создаем дисплей 320x240
     disp = lv_display_create(LCD_H_RES, LCD_V_RES);
