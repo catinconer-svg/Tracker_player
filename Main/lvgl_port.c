@@ -1,6 +1,6 @@
 /**
  * @file lvgl_port.c
- * @brief LVGL port for ST7735 display
+ * @brief LVGL port for ST7789 display (320x240)
  */
 
 #include "lvgl_port.h"
@@ -12,7 +12,7 @@
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include "esp_lcd_st7735.h"
+#include "esp_lcd_st7789.h"
 #include "esp_log.h"
 
 // --- Пины дисплея (новая схема, ESP32-S3) ---
@@ -23,9 +23,9 @@
 #define PIN_LCD_RST     GPIO_NUM_3
 #define PIN_LCD_BL      GPIO_NUM_16
 
-// --- Разрешение экрана ---
-#define LCD_H_RES       128
-#define LCD_V_RES       160
+// --- Разрешение экрана (ST7789, ландшафт 320x240) ---
+#define LCD_H_RES       320
+#define LCD_V_RES       240
 
 // --- SPI хост ---
 #define LCD_SPI_HOST    SPI2_HOST
@@ -33,6 +33,27 @@
 #define LVGL_TICK_PERIOD_MS     1
 
 static const char *TAG = "LVGL_PORT";
+
+// --- Таблица инициализации ST7789 (320x240) ---
+// MADCTL (0x36) = 0xA0 задан здесь же, ниже в таблице
+static const st7789_lcd_init_cmd_t st7789_init_cmds[] = {
+    // cmd, data, bytes, delay_ms
+    {0xB2, (uint8_t[]){0x05, 0x05, 0x00, 0x11, 0x11}, 5, 0},   // Porch Setting (минимум для разгона)
+    {0xBB, (uint8_t[]){0x32}, 1, 0},                           // VCOMS control
+    {0xC0, (uint8_t[]){0x2C}, 1, 0},                           // LCM control
+    {0xC2, (uint8_t[]){0x01}, 1, 0},                           // VDV and VRH command enable
+    {0xC3, (uint8_t[]){0x12}, 1, 0},                           // VRH set
+    {0xC4, (uint8_t[]){0x20}, 1, 0},                           // VDV set
+    {0xC6, (uint8_t[]){0x01}, 1, 0},                           // Frame Rate Control (0x01 = 111Hz)
+    {0xD0, (uint8_t[]){0xA4, 0xA1}, 2, 0},                     // Power Control 1
+    {0x3A, (uint8_t[]){0x05}, 1, 0},                           // 16-bit/pixel
+    {0x36, (uint8_t[]){0xA0}, 1, 0},                           // MADCTL: MY|MX — ландшафт
+    {0xE0, (uint8_t[]){0xD0, 0x04, 0x0D, 0x11, 0x13, 0x2B, 0x3F,
+                      0x54, 0x4C, 0x18, 0x0D, 0x0B, 0x1F, 0x23}, 14, 0}, // Positive Gamma
+    {0xE1, (uint8_t[]){0xD0, 0x04, 0x0C, 0x11, 0x13, 0x2C, 0x3F,
+                      0x44, 0x51, 0x2F, 0x1F, 0x1F, 0x20, 0x23}, 14, 0}, // Negative Gamma
+    {0x21, NULL, 0, 0},                                        // Display Inversion ON (для ST7789)
+};
 
 static lv_display_t *disp;
 static lv_color_t *buf1;
@@ -104,7 +125,7 @@ lv_display_t *lvgl_port_init(void)
         .miso_io_num = -1,
         .quadwp_io_num = -1,
         .quadhd_io_num = -1,
-        .max_transfer_sz = 160 * 128 * 2,
+        .max_transfer_sz = LCD_H_RES * (LCD_V_RES / 3) * 2,
         .flags = SPICOMMON_BUSFLAG_MASTER,
     };
     esp_err_t err = spi_bus_initialize(LCD_SPI_HOST, &buscfg, SPI_DMA_CH_AUTO);
@@ -136,16 +157,24 @@ lv_display_t *lvgl_port_init(void)
     // ★ СОХРАНЯЕМ IO_HANDLE ★
     gb_io_handle = io_handle;
 
-    // 3. Создание панели ST7735
+    // 3. Создание панели ST7789 с кастомной таблицей инициализации
     esp_lcd_panel_handle_t panel_handle = NULL;
     esp_lcd_panel_dev_config_t panel_config = {
         .reset_gpio_num = PIN_LCD_RST,
         .rgb_ele_order = LCD_RGB_ELEMENT_ORDER_RGB,
         .bits_per_pixel = 16,
+        .vendor_config = &(esp_lcd_panel_vendor_st7789_t){
+            .reset_sequence_us = 5000,
+            .init_sequence_us = 5000,
+            .invert_on = true,          // инверсия включена (ST7789 требует 0x21)
+            .rgb_ele_order = LCD_RGB_ELEMENT_ORDER_RGB,
+            .cmds_to_submit = st7789_init_cmds,
+            .num_of_cmds = sizeof(st7789_init_cmds) / sizeof(st7789_init_cmds[0]),
+        },
     };
-    err = esp_lcd_new_panel_st7735(io_handle, &panel_config, &panel_handle);
+    err = esp_lcd_new_panel_st7789(io_handle, &panel_config, &panel_handle);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "esp_lcd_new_panel_st7735 failed: %s", esp_err_to_name(err));
+        ESP_LOGE(TAG, "esp_lcd_new_panel_st7789 failed: %s", esp_err_to_name(err));
         return NULL;
     }
     ESP_LOGI(TAG, "Panel created");
@@ -168,33 +197,29 @@ lv_display_t *lvgl_port_init(void)
 
 
     ESP_ERROR_CHECK(esp_lcd_panel_set_gap(panel_handle, 0, 0));
-    ESP_ERROR_CHECK(esp_lcd_panel_invert_color(panel_handle, false));
+    // Инверсия цвета уже выставлена через vendor_config (.invert_on = true)
     vTaskDelay(pdMS_TO_TICKS(50));
     ESP_LOGI(TAG, "Panel initialized");
 
-    // 5. Поворот экрана
-    esp_lcd_panel_swap_xy(panel_handle, true);
-    esp_lcd_panel_mirror(panel_handle, true, false);
-    ESP_LOGI(TAG, "Panel rotated to 160x128");
+    // 5. Ориентация: MADCTL=0xA0 из таблицы -> нативный ландшафт 320x240,
+    //    дополнительные swap/mirror не требуются.
 
-uint8_t madctl_value = 0x60; 
-esp_lcd_panel_io_tx_param(io_handle, 0x36, &madctl_value, 1);
-ESP_LOGI(TAG, "MADCTL final: 0x%02X (RGB, rotated 160x128)", madctl_value);  
     // 6. Инициализация LVGL
     lv_init();
-    
-    // Буферы для 160x20
-    buf1 = heap_caps_malloc(160 * 20 * sizeof(lv_color_t), MALLOC_CAP_DMA);
-    buf2 = heap_caps_malloc(160 * 20 * sizeof(lv_color_t), MALLOC_CAP_DMA);
+
+    // Буферы на треть экрана для частичной отрисовки
+    const size_t buf_pixels = LCD_H_RES * (LCD_V_RES / 3);
+    buf1 = heap_caps_malloc(buf_pixels * sizeof(lv_color_t), MALLOC_CAP_DMA);
+    buf2 = heap_caps_malloc(buf_pixels * sizeof(lv_color_t), MALLOC_CAP_DMA);
     if (!buf1 || !buf2) {
         ESP_LOGE(TAG, "Failed to allocate LVGL buffers");
         return NULL;
     }
 
-    // Создаем дисплей 160x128
-    disp = lv_display_create(160, 128);
+    // Создаем дисплей 320x240
+    disp = lv_display_create(LCD_H_RES, LCD_V_RES);
     lv_display_set_color_format(disp, LV_COLOR_FORMAT_RGB565_SWAPPED);
-    lv_display_set_buffers(disp, buf1, buf2, 160 * 20 * sizeof(lv_color_t), LV_DISPLAY_RENDER_MODE_PARTIAL);
+    lv_display_set_buffers(disp, buf1, buf2, buf_pixels * sizeof(lv_color_t), LV_DISPLAY_RENDER_MODE_PARTIAL);
     lv_display_set_flush_cb(disp, lvgl_port_flush_cb);
     lv_display_set_user_data(disp, (void *)panel_handle);
     ESP_LOGI(TAG, "LVGL display created");
@@ -219,6 +244,6 @@ ESP_LOGI(TAG, "MADCTL final: 0x%02X (RGB, rotated 160x128)", madctl_value);
     ESP_ERROR_CHECK(gpio_config(&bk_gpio_config));
     gpio_set_level(PIN_LCD_BL, 1);
 
-    ESP_LOGI(TAG, "LVGL port initialized successfully (160x128)");
+    ESP_LOGI(TAG, "LVGL port initialized successfully (320x240 ST7789)");
     return disp;
 }
