@@ -15,20 +15,20 @@
 #include "esp_lcd_st7735.h"
 #include "esp_log.h"
 
-// --- Пины дисплея ---
-#define PIN_LCD_MOSI    18
-#define PIN_LCD_SCLK    8
-#define PIN_LCD_CS      6
-#define PIN_LCD_DC      17
-#define PIN_LCD_RST     7
-#define PIN_LCD_BL      15
+// --- Пины дисплея (новая схема, ESP32-S3) ---
+#define PIN_LCD_MOSI    GPIO_NUM_18
+#define PIN_LCD_SCLK    GPIO_NUM_17
+#define PIN_LCD_CS      GPIO_NUM_9
+#define PIN_LCD_DC      GPIO_NUM_8
+#define PIN_LCD_RST     GPIO_NUM_3
+#define PIN_LCD_BL      GPIO_NUM_16
 
 // --- Разрешение экрана ---
 #define LCD_H_RES       128
 #define LCD_V_RES       160
 
 // --- SPI хост ---
-#define LCD_SPI_HOST    SPI3_HOST
+#define LCD_SPI_HOST    SPI2_HOST
 
 #define LVGL_TICK_PERIOD_MS     1
 

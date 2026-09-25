@@ -8,14 +8,14 @@
 
 static const char *TAG = "SD_CARD";
 
-// --- Пины SD карты (из твоей таблицы подключения) ---
-#define PIN_SD_MOSI     13
-#define PIN_SD_MISO     12
-#define PIN_SD_CLK      10
-#define PIN_SD_CS       14
+// --- Пины SD карты (новая схема, ESP32-S3) ---
+#define PIN_SD_MOSI     GPIO_NUM_7
+#define PIN_SD_MISO     GPIO_NUM_5
+#define PIN_SD_CLK      GPIO_NUM_4
+#define PIN_SD_CS       GPIO_NUM_15
 
 // --- SPI хост для SD карты ---
-#define SD_SPI_HOST     SPI2_HOST
+#define SD_SPI_HOST     SPI3_HOST
 
 // --- Точка монтирования ---
 #define MOUNT_POINT     "/sdcard"

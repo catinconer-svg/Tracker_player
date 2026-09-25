@@ -5,53 +5,61 @@
 #include "audio_player.h"
 #include "settings_ui.h"
 #include "gb_emulator.hpp"
-#include "gnuboy.h"   // ← ДОБАВИТЬ ЭТУ СТРОКУ
+#include "gnuboy.h"   // GB_PAD_* (enum)
 static const char *TAG = "INPUT";
 
-#define PIN_ENC_A       39
-#define PIN_ENC_B       38
-#define PIN_ENC_BUTTON  21
-
-#define PIN_BTN_UP      40
-#define PIN_BTN_DOWN    5
-#define PIN_BTN_LEFT    41
-#define PIN_BTN_RIGHT   4
-#define PIN_BTN_A       3
-#define PIN_BTN_B       9
+// ==== НОВАЯ СХЕМА: 12 кнопок, энкодера нет ====
+#define KEY_UP      GPIO_NUM_12
+#define KEY_DOWN    GPIO_NUM_10
+#define KEY_LEFT    GPIO_NUM_13
+#define KEY_RIGHT   GPIO_NUM_11
+#define KEY_A       GPIO_NUM_41
+#define KEY_B       GPIO_NUM_21
+#define KEY_X       GPIO_NUM_40
+#define KEY_Y       GPIO_NUM_39
+#define KEY_START   GPIO_NUM_48
+#define KEY_SELECT  GPIO_NUM_45
+#define KEY_MENU    GPIO_NUM_0
+#define KEY_OPTION  GPIO_NUM_38
 
 #define DEBOUNCE_US     5000
+#define REPEAT_DELAY_US 400000   // задержка перед автоповтором
+#define REPEAT_RATE_US  150000   // период автоповтора
 
-static lv_indev_t *encoder_indev;
+// Битовые маски логических кнопок (бит СБРОШЕН = нажата)
+#define BM_UP      (1u << 0)
+#define BM_DOWN    (1u << 1)
+#define BM_LEFT    (1u << 2)
+#define BM_RIGHT   (1u << 3)
+#define BM_A       (1u << 4)
+#define BM_B       (1u << 5)
+#define BM_X       (1u << 6)
+#define BM_Y       (1u << 7)
+#define BM_START   (1u << 8)
+#define BM_SELECT  (1u << 9)
+#define BM_MENU    (1u << 10)
+#define BM_OPTION  (1u << 11)
+
+#define NUM_KEYS   12
+
 static lv_indev_t *kb_indev;
 static lv_group_t *input_group;
 static input_mode_t current_mode = INPUT_MODE_FILE_EXPLORER;
 
-static volatile int32_t enc_diff = 0;
-static volatile uint8_t enc_state = 0;
-static volatile int enc_button_state = 1;
-
-static volatile uint8_t btn_states = 0xFF;
-static volatile uint8_t btn_prev = 0xFF;
+static volatile uint16_t btn_states = 0x0FFF;   // текущее состояние (1 = отжата)
+static volatile uint16_t btn_prev = 0x0FFF;     // состояние в прошлом опросе
 static volatile int64_t last_btn_time = 0;
+
+// Автоповтор удерживаемых кнопок
+static int64_t press_time[NUM_KEYS]   = {0};    // когда кнопка была нажата
+static int64_t repeat_time[NUM_KEYS]  = {0};    // когда был последний автоповтор
 
 volatile bool open_settings_flag = false;
 volatile bool exit_settings_flag = false;
 
 static volatile bool in_settings = false;
-static volatile bool btn_b_was_pressed = false;
-static volatile int64_t btn_b_first_press = 0;
 
 static lv_obj_t *player_screen_ref = NULL;
-
-// ★ КОНСТАНТЫ КНОПОК GAMEBOY (PAD_* из gnuboy) ★
-#define PAD_RIGHT  0x01
-#define PAD_LEFT   0x02
-#define PAD_UP     0x04
-#define PAD_DOWN   0x08
-#define PAD_A      0x10
-#define PAD_B      0x20
-#define PAD_SELECT 0x40
-#define PAD_START  0x80
 
 void input_set_player_screen(lv_obj_t *screen) {
     player_screen_ref = screen;
@@ -60,7 +68,7 @@ void input_set_player_screen(lv_obj_t *screen) {
 void input_set_in_settings(bool state) {
     in_settings = state;
     ESP_LOGI(TAG, "Settings mode: %s", state ? "ACTIVE" : "INACTIVE");
-    btn_prev = btn_states;
+    btn_prev = btn_states;   // не генерируем фантомных событий при смене режима
     if (state) {
         open_settings_flag = false;
     }
@@ -70,259 +78,209 @@ bool input_get_in_settings(void) {
     return in_settings;
 }
 
-static const int8_t encoder_table[16] = {
-    0, -1,  1,  0,
-    1,  0,  0, -1,
-   -1,  0,  0,  1,
-    0,  1, -1,  0
-};
-
-static void encoder_read_cb(lv_indev_t *indev, lv_indev_data_t *data)
-{
-    int a = gpio_get_level(PIN_ENC_A);
-    int b = gpio_get_level(PIN_ENC_B);
-    uint8_t new_state = (a << 1) | b;
-    
-    if (new_state != enc_state) {
-        uint8_t index = (enc_state << 2) | new_state;
-        enc_diff += encoder_table[index];
-        enc_state = new_state;
-    }
-
-    /* ★ GAMEBOY: энкодер уже обрабатывается в keyboard_read_cb ★ */
-    if (gb_emulator_is_running()) {
-        /* ★ ТОЛЬКО КНОПКА ЭНКОДЕРА ДЛЯ START ★ */
-        int btn = gpio_get_level(PIN_ENC_BUTTON);
-        if (btn == 0 && enc_button_state == 1) {
-            // START уже обрабатывается в keyboard_read_cb
-            enc_button_state = 0;
-        } else if (btn == 1 && enc_button_state == 0) {
-            enc_button_state = 1;
-        }
-        data->enc_diff = 0;
-        data->state = LV_INDEV_STATE_RELEASED;
-        return;
-    }
-
-    if (current_mode == INPUT_MODE_PLAYER && in_settings) {
-        data->enc_diff = enc_diff;
-        enc_diff = 0;
-        
-        int btn = gpio_get_level(PIN_ENC_BUTTON);
-        if (btn == 0 && enc_button_state == 1) {
-            data->state = LV_INDEV_STATE_PRESSED;
-            enc_button_state = 0;
-        } else if (btn == 1 && enc_button_state == 0) {
-            data->state = LV_INDEV_STATE_RELEASED;
-            enc_button_state = 1;
-        } else {
-            data->state = LV_INDEV_STATE_RELEASED;
-        }
-        return;
-    }
-    
-    if (current_mode == INPUT_MODE_PLAYER && !in_settings) {
-        if (enc_diff > 0) {
-            for (int i = 0; i < enc_diff; i++) audio_player_volume_up();
-            enc_diff = 0;
-        } else if (enc_diff < 0) {
-            for (int i = 0; i < -enc_diff; i++) audio_player_volume_down();
-            enc_diff = 0;
-        }
-
-        int btn = gpio_get_level(PIN_ENC_BUTTON);
-        if (btn == 0 && enc_button_state == 1) {
-            audio_player_toggle_mute();
-            enc_button_state = 0;
-        } else if (btn == 1) {
-            enc_button_state = 1;
-        }
-
-        data->enc_diff = 0;
-        data->state = LV_INDEV_STATE_RELEASED;
-        return;
-    }
-
-    data->enc_diff = enc_diff;
-    enc_diff = 0;
-    
-    int btn = gpio_get_level(PIN_ENC_BUTTON);
-    if (btn == 0 && enc_button_state == 1) {
-        data->state = LV_INDEV_STATE_PRESSED;
-        enc_button_state = 0;
-    } else if (btn == 1 && enc_button_state == 0) {
-        data->state = LV_INDEV_STATE_RELEASED;
-        enc_button_state = 1;
-    } else {
-        data->state = LV_INDEV_STATE_RELEASED;
-    }
-}
-
-static uint8_t read_buttons(void)
+// Чтение всех кнопок с дребезгом. Возвращает bitmask: бит СБРОШЕН = кнопка нажата.
+static uint16_t read_buttons(void)
 {
     int64_t now = esp_timer_get_time();
     if (now - last_btn_time < DEBOUNCE_US) return btn_states;
     last_btn_time = now;
 
-    uint8_t new_state = 0;
-    new_state |= (gpio_get_level(PIN_BTN_UP)    << 0);
-    new_state |= (gpio_get_level(PIN_BTN_DOWN)  << 1);
-    new_state |= (gpio_get_level(PIN_BTN_LEFT)  << 2);
-    new_state |= (gpio_get_level(PIN_BTN_RIGHT) << 3);
-    new_state |= (gpio_get_level(PIN_BTN_A)     << 4);
-    new_state |= (gpio_get_level(PIN_BTN_B)     << 5);
+    uint16_t s = 0;
+    s |= (uint16_t)gpio_get_level(KEY_UP)     << 0;
+    s |= (uint16_t)gpio_get_level(KEY_DOWN)   << 1;
+    s |= (uint16_t)gpio_get_level(KEY_LEFT)   << 2;
+    s |= (uint16_t)gpio_get_level(KEY_RIGHT)  << 3;
+    s |= (uint16_t)gpio_get_level(KEY_A)      << 4;
+    s |= (uint16_t)gpio_get_level(KEY_B)      << 5;
+    s |= (uint16_t)gpio_get_level(KEY_X)      << 6;
+    s |= (uint16_t)gpio_get_level(KEY_Y)      << 7;
+    s |= (uint16_t)gpio_get_level(KEY_START)  << 8;
+    s |= (uint16_t)gpio_get_level(KEY_SELECT) << 9;
+    s |= (uint16_t)gpio_get_level(KEY_MENU)   << 10;
+    s |= (uint16_t)gpio_get_level(KEY_OPTION) << 11;
 
-    if (new_state == btn_states) return btn_states;
-    btn_states = new_state;
+    btn_states = s;
     return btn_states;
+}
+
+static inline bool pressed(uint16_t cur, uint16_t prev, uint16_t bm) {
+    return !(cur & bm) && (prev & bm);      // фронт: была отжата -> нажата
+}
+
+static inline bool held(uint16_t cur, uint16_t bm) {
+    return !(cur & bm);
+}
+
+static inline bool released_edge(uint16_t cur, uint16_t prev, uint16_t bm) {
+    return (cur & bm) && !(prev & bm);      // спад: была нажата -> отжата
+}
+
+// Обновить таймеры автоповтора и вернуть true, если в этом кадре нужно
+// сгенерировать повторное событие для удерживаемой кнопки bm.
+static bool key_repeat(uint16_t cur, uint16_t prev, uint16_t bm, int idx)
+{
+    int64_t now = esp_timer_get_time();
+
+    if (pressed(cur, prev, bm)) {           // только что нажата
+        press_time[idx] = now;
+        repeat_time[idx] = 0;
+        return false;                       // первое событие даёт вызывающий код
+    }
+
+    if (!held(cur, bm)) {                   // отжата — сброс
+        press_time[idx] = 0;
+        repeat_time[idx] = 0;
+        return false;
+    }
+
+    if (press_time[idx] == 0) return false;
+
+    if (repeat_time[idx] == 0) {            // ждём начальную задержку
+        if (now - press_time[idx] >= REPEAT_DELAY_US) {
+            repeat_time[idx] = now;
+            return true;
+        }
+        return false;
+    }
+
+    if (now - repeat_time[idx] >= REPEAT_RATE_US) {
+        repeat_time[idx] = now;
+        return true;
+    }
+    return false;
 }
 
 static void keyboard_read_cb(lv_indev_t *indev, lv_indev_data_t *data)
 {
-    uint8_t btns = read_buttons();
+    uint16_t btns = read_buttons();
     data->state = LV_INDEV_STATE_RELEASED;
     data->key = 0;
 
-    /* ★ ★ ★ СНАЧАЛА GAMEBOY ★ ★ ★ */
-/* ★ ★ ★ СНАЧАЛА GAMEBOY ★ ★ ★ */
-if (gb_emulator_is_running()) {
-    // Кнопка A → GameBoy A
-    if (!(btns & (1 << 4)) && (btn_prev & (1 << 4))) {
-        gb_emulator_set_button(GB_PAD_A, true);
-    }
-    if ((btns & (1 << 4)) && !(btn_prev & (1 << 4))) {
-        gb_emulator_set_button(GB_PAD_A, false);
-    }
+    /* ★ ★ ★ GAMEBOY (приоритет) ★ ★ ★ */
+    if (gb_emulator_is_running()) {
+        // D-pad: активна всё время нажатия
+        gb_emulator_set_button(GB_PAD_UP,    held(btns, BM_UP));
+        gb_emulator_set_button(GB_PAD_DOWN,  held(btns, BM_DOWN));
+        gb_emulator_set_button(GB_PAD_LEFT,  held(btns, BM_LEFT));
+        gb_emulator_set_button(GB_PAD_RIGHT, held(btns, BM_RIGHT));
 
-    // Кнопка B → GameBoy B
-    if (!(btns & (1 << 5)) && (btn_prev & (1 << 5))) {
-        gb_emulator_set_button(GB_PAD_B, true);
-    }
-    if ((btns & (1 << 5)) && !(btn_prev & (1 << 5))) {
-        gb_emulator_set_button(GB_PAD_B, false);
-    }
+        // A/X → GameBoy A, B/Y → GameBoy B
+        if (pressed(btns, btn_prev, BM_A) || pressed(btns, btn_prev, BM_X))
+            gb_emulator_set_button(GB_PAD_A, true);
+        if (released_edge(btns, btn_prev, BM_A) && !held(btns, BM_X))
+            gb_emulator_set_button(GB_PAD_A, false);
 
-    // Кнопки UP/DOWN/LEFT/RIGHT
-    // UP
-    if (!(btns & (1 << 0))) {
-        gb_emulator_set_button(GB_PAD_UP, true);
-    } else {
-        gb_emulator_set_button(GB_PAD_UP, false);
+        if (pressed(btns, btn_prev, BM_B) || pressed(btns, btn_prev, BM_Y))
+            gb_emulator_set_button(GB_PAD_B, true);
+        if (released_edge(btns, btn_prev, BM_B) && !held(btns, BM_Y))
+            gb_emulator_set_button(GB_PAD_B, false);
+
+        // START / SELECT — теперь это отдельные физические кнопки
+        if (pressed(btns, btn_prev, BM_START))
+            gb_emulator_set_button(GB_PAD_START, true);
+        if (released_edge(btns, btn_prev, BM_START))
+            gb_emulator_set_button(GB_PAD_START, false);
+
+        if (pressed(btns, btn_prev, BM_SELECT))
+            gb_emulator_set_button(GB_PAD_SELECT, true);
+        if (released_edge(btns, btn_prev, BM_SELECT))
+            gb_emulator_set_button(GB_PAD_SELECT, false);
+
+        gb_emulator_update_input();
+
+        btn_prev = btns;
+        return;  // ★ ВЫХОДИМ - НИЧЕГО БОЛЬШЕ НЕ ОБРАБАТЫВАЕМ ★
     }
-
-    // DOWN
-    if (!(btns & (1 << 1))) {
-        gb_emulator_set_button(GB_PAD_DOWN, true);
-    } else {
-        gb_emulator_set_button(GB_PAD_DOWN, false);
-    }
-
-    // LEFT
-    if (!(btns & (1 << 2))) {
-        gb_emulator_set_button(GB_PAD_LEFT, true);
-    } else {
-        gb_emulator_set_button(GB_PAD_LEFT, false);
-    }
-
-    // RIGHT
-    if (!(btns & (1 << 3))) {
-        gb_emulator_set_button(GB_PAD_RIGHT, true);
-    } else {
-        gb_emulator_set_button(GB_PAD_RIGHT, false);
-    }
-
-    // START (кнопка энкодера)
-    int enc_btn = gpio_get_level(PIN_ENC_BUTTON);
-    if (enc_btn == 0 && enc_button_state == 1) {
-        gb_emulator_set_button(GB_PAD_START, true);
-        enc_button_state = 0;
-    } else if (enc_btn == 1 && enc_button_state == 0) {
-        gb_emulator_set_button(GB_PAD_START, false);
-        enc_button_state = 1;
-    }
-
-    // SELECT (UP + DOWN одновременно)
-    if (!(btns & (1 << 0)) && !(btns & (1 << 1))) {
-        gb_emulator_set_button(GB_PAD_SELECT, true);
-    } else {
-        gb_emulator_set_button(GB_PAD_SELECT, false);
-    }
-
-    // Обновляем состояние эмулятора
-    gb_emulator_update_input();
-
-    btn_prev = btns;
-    return;  // ★ ВЫХОДИМ - НИЧЕГО БОЛЬШЕ НЕ ОБРАБАТЫВАЕМ ★
-}
 
     /* ★ НАСТРОЙКИ ★ */
     if (current_mode == INPUT_MODE_PLAYER && in_settings) {
-        if (!(btns & (1 << 5)) && (btn_prev & (1 << 5))) {
+        if (pressed(btns, btn_prev, BM_B) || pressed(btns, btn_prev, BM_MENU)) {
             settings_ui_handle_esc();
             data->key = LV_KEY_ESC;
             data->state = LV_INDEV_STATE_PRESSED;
-        } else if ((btns & (1 << 5)) && !(btn_prev & (1 << 5))) {
-            data->key = LV_KEY_ESC;
-            data->state = LV_INDEV_STATE_RELEASED;
+        } else if (pressed(btns, btn_prev, BM_A)) {
+            data->key = LV_KEY_ENTER;
+            data->state = LV_INDEV_STATE_PRESSED;
+        } else if (pressed(btns, btn_prev, BM_UP) || key_repeat(btns, btn_prev, BM_UP, 0)) {
+            data->key = LV_KEY_UP;
+            data->state = LV_INDEV_STATE_PRESSED;
+        } else if (pressed(btns, btn_prev, BM_DOWN) || key_repeat(btns, btn_prev, BM_DOWN, 1)) {
+            data->key = LV_KEY_DOWN;
+            data->state = LV_INDEV_STATE_PRESSED;
+        } else if (pressed(btns, btn_prev, BM_LEFT) || key_repeat(btns, btn_prev, BM_LEFT, 2)) {
+            data->key = LV_KEY_LEFT;
+            data->state = LV_INDEV_STATE_PRESSED;
+        } else if (pressed(btns, btn_prev, BM_RIGHT) || key_repeat(btns, btn_prev, BM_RIGHT, 3)) {
+            data->key = LV_KEY_RIGHT;
+            data->state = LV_INDEV_STATE_PRESSED;
         }
-        else if (!(btns & (1 << 0)) && (btn_prev & (1 << 0))) { data->key = LV_KEY_UP; data->state = LV_INDEV_STATE_PRESSED; }
-        else if (!(btns & (1 << 1)) && (btn_prev & (1 << 1))) { data->key = LV_KEY_DOWN; data->state = LV_INDEV_STATE_PRESSED; }
-        else if (!(btns & (1 << 4)) && (btn_prev & (1 << 4))) { data->key = LV_KEY_ENTER; data->state = LV_INDEV_STATE_PRESSED; }
-        else if (!(btns & (1 << 2)) && (btn_prev & (1 << 2))) { data->key = LV_KEY_LEFT; data->state = LV_INDEV_STATE_PRESSED; }
-        else if (!(btns & (1 << 3)) && (btn_prev & (1 << 3))) { data->key = LV_KEY_RIGHT; data->state = LV_INDEV_STATE_PRESSED; }
-        
+
         btn_prev = btns;
         return;
     }
 
     /* ★ ПЛЕЕР (если не GameBoy) ★ */
     if (current_mode == INPUT_MODE_PLAYER && !in_settings) {
-        // Кнопка A: Play/Pause
-        if (!(btns & (1 << 4)) && (btn_prev & (1 << 4))) {
-            audio_player_toggle_pause();
-        }
-        
-        // Кнопка B: Stop (двойное нажатие)
-        if (!(btns & (1 << 5)) && (btn_prev & (1 << 5))) {
-            int64_t now = esp_timer_get_time();
-            if (btn_b_was_pressed && (now - btn_b_first_press) < 800000) {
-                audio_player_stop();
-                btn_b_was_pressed = false;
-            } else {
-                audio_player_stop();
-                btn_b_was_pressed = true;
-                btn_b_first_press = now;
-            }
-        }
-        if (btn_b_was_pressed && (esp_timer_get_time() - btn_b_first_press) > 1000000) {
-            btn_b_was_pressed = false;
-        }
+        // A: Play/Pause
+        if (pressed(btns, btn_prev, BM_A)) audio_player_toggle_pause();
 
-        // Кнопка LEFT: пред. трек
-        if (!(btns & (1 << 2)) && (btn_prev & (1 << 2))) audio_player_prev_track();
-        // Кнопка RIGHT: след. трек
-        if (!(btns & (1 << 3)) && (btn_prev & (1 << 3))) audio_player_next_track();
-        // Кнопка DOWN: переключение режима повтора
-        if (!(btns & (1 << 1)) && (btn_prev & (1 << 1))) audio_player_toggle_repeat();
-        // Кнопка UP: открыть настройки
-        if (!(btns & (1 << 0)) && (btn_prev & (1 << 0))) open_settings_flag = true;
+        // B: Stop
+        if (pressed(btns, btn_prev, BM_B)) audio_player_stop();
+
+        // LEFT: пред. трек, RIGHT: след. трек (с автоповтором)
+        if (pressed(btns, btn_prev, BM_LEFT) || key_repeat(btns, btn_prev, BM_LEFT, 2))
+            audio_player_prev_track();
+        if (pressed(btns, btn_prev, BM_RIGHT) || key_repeat(btns, btn_prev, BM_RIGHT, 3))
+            audio_player_next_track();
+
+        // DOWN: режим повтора
+        if (pressed(btns, btn_prev, BM_DOWN)) audio_player_toggle_repeat();
+
+        // UP или MENU: открыть настройки
+        if (pressed(btns, btn_prev, BM_UP) || pressed(btns, btn_prev, BM_MENU))
+            open_settings_flag = true;
+
+        // X: громкость вниз, Y: громкость вверх (с автоповтором)
+        // (раньше громкость крутилась энкодером)
+        if (pressed(btns, btn_prev, BM_X) || key_repeat(btns, btn_prev, BM_X, 6))
+            audio_player_volume_down();
+        if (pressed(btns, btn_prev, BM_Y) || key_repeat(btns, btn_prev, BM_Y, 7))
+            audio_player_volume_up();
+
+        // START: mute (как кнопка энкодера раньше)
+        if (pressed(btns, btn_prev, BM_START)) audio_player_toggle_mute();
 
         btn_prev = btns;
         return;
     }
 
     /* ★ FILE EXPLORER ★ */
-    if (!(btns & (1 << 0))) { data->key = LV_KEY_UP; data->state = LV_INDEV_STATE_PRESSED; }
-    else if (!(btn_prev & (1 << 0))) { data->key = LV_KEY_UP; data->state = LV_INDEV_STATE_RELEASED; }
-    
-    if (!(btns & (1 << 1))) { data->key = LV_KEY_DOWN; data->state = LV_INDEV_STATE_PRESSED; }
-    else if (!(btn_prev & (1 << 1))) { data->key = LV_KEY_DOWN; data->state = LV_INDEV_STATE_RELEASED; }
-    
-    if (!(btns & (1 << 4))) { data->key = LV_KEY_ENTER; data->state = LV_INDEV_STATE_PRESSED; }
-    else if (!(btn_prev & (1 << 4))) { data->key = LV_KEY_ENTER; data->state = LV_INDEV_STATE_RELEASED; }
-    
-    if (!(btns & (1 << 5))) { data->key = LV_KEY_BACKSPACE; data->state = LV_INDEV_STATE_PRESSED; }
-    else if (!(btn_prev & (1 << 5))) { data->key = LV_KEY_BACKSPACE; data->state = LV_INDEV_STATE_RELEASED; }
+    // Up/Down — навигация по списку с автоповтором (энкодера больше нет)
+    if (pressed(btns, btn_prev, BM_UP) || key_repeat(btns, btn_prev, BM_UP, 0)) {
+        data->key = LV_KEY_UP; data->state = LV_INDEV_STATE_PRESSED;
+    } else if (released_edge(btns, btn_prev, BM_UP)) {
+        data->key = LV_KEY_UP; data->state = LV_INDEV_STATE_RELEASED;
+    }
+
+    if (pressed(btns, btn_prev, BM_DOWN) || key_repeat(btns, btn_prev, BM_DOWN, 1)) {
+        data->key = LV_KEY_DOWN; data->state = LV_INDEV_STATE_PRESSED;
+    } else if (released_edge(btns, btn_prev, BM_DOWN)) {
+        data->key = LV_KEY_DOWN; data->state = LV_INDEV_STATE_RELEASED;
+    }
+
+    // Enter: A или START
+    if (pressed(btns, btn_prev, BM_A) || pressed(btns, btn_prev, BM_START)) {
+        data->key = LV_KEY_ENTER; data->state = LV_INDEV_STATE_PRESSED;
+    } else if (released_edge(btns, btn_prev, BM_A) || released_edge(btns, btn_prev, BM_START)) {
+        data->key = LV_KEY_ENTER; data->state = LV_INDEV_STATE_RELEASED;
+    }
+
+    // Backspace (наверх по каталогу): B или MENU
+    if (pressed(btns, btn_prev, BM_B) || pressed(btns, btn_prev, BM_MENU)) {
+        data->key = LV_KEY_BACKSPACE; data->state = LV_INDEV_STATE_PRESSED;
+    } else if (released_edge(btns, btn_prev, BM_B) || released_edge(btns, btn_prev, BM_MENU)) {
+        data->key = LV_KEY_BACKSPACE; data->state = LV_INDEV_STATE_RELEASED;
+    }
 
     btn_prev = btns;
 }
@@ -330,21 +288,21 @@ if (gb_emulator_is_running()) {
 static void gpio_init(void)
 {
     gpio_config_t io_conf = {
+        .pin_bit_mask = (1ULL << KEY_UP) | (1ULL << KEY_DOWN) |
+                        (1ULL << KEY_LEFT) | (1ULL << KEY_RIGHT) |
+                        (1ULL << KEY_A) | (1ULL << KEY_B) |
+                        (1ULL << KEY_X) | (1ULL << KEY_Y) |
+                        (1ULL << KEY_START) | (1ULL << KEY_SELECT) |
+                        (1ULL << KEY_MENU) | (1ULL << KEY_OPTION),
         .mode = GPIO_MODE_INPUT,
         .pull_up_en = GPIO_PULLUP_ENABLE,
         .pull_down_en = GPIO_PULLDOWN_DISABLE,
         .intr_type = GPIO_INTR_DISABLE,
     };
-
-    io_conf.pin_bit_mask = (1ULL << PIN_ENC_A) | (1ULL << PIN_ENC_B) | (1ULL << PIN_ENC_BUTTON);
     gpio_config(&io_conf);
-    enc_state = (gpio_get_level(PIN_ENC_A) << 1) | gpio_get_level(PIN_ENC_B);
-    enc_button_state = gpio_get_level(PIN_ENC_BUTTON);
 
-    io_conf.pin_bit_mask = (1ULL << PIN_BTN_UP) | (1ULL << PIN_BTN_DOWN) |
-                           (1ULL << PIN_BTN_LEFT) | (1ULL << PIN_BTN_RIGHT) |
-                           (1ULL << PIN_BTN_A) | (1ULL << PIN_BTN_B);
-    gpio_config(&io_conf);
+    btn_states = read_buttons();
+    btn_prev = btn_states;
 }
 
 void input_init(void)
@@ -357,17 +315,12 @@ void input_init(void)
 
     ESP_LOGI(TAG, "input_init: created group at %p, set as default (Navigation Mode)", (void*)input_group);
 
-    encoder_indev = lv_indev_create();
-    lv_indev_set_type(encoder_indev, LV_INDEV_TYPE_ENCODER);
-    lv_indev_set_read_cb(encoder_indev, encoder_read_cb);
-    lv_indev_set_group(encoder_indev, input_group);
-
     kb_indev = lv_indev_create();
     lv_indev_set_type(kb_indev, LV_INDEV_TYPE_KEYPAD);
     lv_indev_set_read_cb(kb_indev, keyboard_read_cb);
     lv_indev_set_group(kb_indev, input_group);
 
-    ESP_LOGI(TAG, "Input initialized");
+    ESP_LOGI(TAG, "Input initialized (12 buttons, no encoder)");
 }
 
 void input_set_mode(input_mode_t mode)

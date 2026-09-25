@@ -348,7 +348,7 @@ static lv_obj_t *create_audio_settings(lv_obj_t *menu, lv_group_t *group, const 
     lv_obj_set_style_pad_all(info, 4, 0);
     lv_obj_set_style_bg_color(info, lv_color_hex(0x000000), 0);
     lv_obj_t *info_label = lv_label_create(info);
-    lv_label_set_text(info_label, "Use encoder to adjust");
+    lv_label_set_text(info_label, "Use Left/Right to adjust");
     lv_obj_set_style_text_color(info_label, lv_color_hex(0x666666), 0);
     lv_obj_set_style_text_font(info_label, &lv_font_montserrat_10, 0);
     
