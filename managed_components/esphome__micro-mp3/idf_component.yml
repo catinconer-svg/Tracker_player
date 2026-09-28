@@ -1,0 +1,13 @@
+dependencies:
+  idf: '>=4.4'
+description: OpenCore MP3 decoder library for ESP32 - MP3 audio decoding with ESP-IDF
+  support
+license: Apache-2.0
+maintainers:
+- Kevin Ahrendt <kevin.ahrendt@openhomefoundation.org>
+repository: git://github.com/esphome-libs/micro-mp3.git
+repository_info:
+  commit_sha: ec31b24ad710fb391f17d42ca15ecfbeb4a22f59
+  path: .
+url: https://github.com/esphome-libs/micro-mp3
+version: 0.2.1
